@@ -805,6 +805,11 @@ pub fn resolve_vtable_under_param_substs(tcx: &ty::ctxt,
         typeck::vtable_param(n_param, n_bound) => {
             find_vtable(tcx, param_substs, n_param, n_bound)
         }
+        typeck::vtable_coerced_obj(ref base, ref adjusted) => {
+            let b = resolve_vtable_under_param_substs(tcx, param_substs, *base);
+            let a = resolve_vtable_under_param_substs(tcx, param_substs, *adjusted);
+            typeck::vtable_coerced_obj(box b, box a)
+        }
     }
 }
 

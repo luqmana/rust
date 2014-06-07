@@ -682,6 +682,16 @@ pub fn encode_vtable_origin(ecx: &e::EncodeContext,
                 })
             })
           }
+          typeck::vtable_coerced_obj(ref base, ref adjusted) => {
+            ebml_w.emit_enum_variant("vtable_coerced_obj", 2u, 2u, |ebml_w| {
+                ebml_w.emit_enum_variant_arg(0u, |ebml_w| {
+                    Ok(encode_vtable_origin(ecx, ebml_w, *base))
+                });
+                ebml_w.emit_enum_variant_arg(1u, |ebml_w| {
+                    Ok(encode_vtable_origin(ecx, ebml_w, *adjusted))
+                })
+            })
+          }
         }
     }).unwrap()
 }
@@ -737,7 +747,7 @@ impl<'a> vtable_decoder_helpers for reader::Decoder<'a> {
         self.read_enum("vtable_origin", |this| {
             this.read_enum_variant(["vtable_static",
                                     "vtable_param",
-                                    "vtable_self"],
+                                    "vtable_coerced_obj"],
                                    |this, i| {
                 Ok(match i {
                   0 => {
@@ -760,6 +770,16 @@ impl<'a> vtable_decoder_helpers for reader::Decoder<'a> {
                         }).unwrap(),
                         this.read_enum_variant_arg(1u, |this| {
                             this.read_uint()
+                        }).unwrap()
+                    )
+                  }
+                  2 => {
+                    typeck::vtable_coerced_obj(
+                        this.read_enum_variant_arg(0u, |this| {
+                            Ok(box this.read_vtable_origin(tcx, cdata))
+                        }).unwrap(),
+                        this.read_enum_variant_arg(1u, |this| {
+                            Ok(box this.read_vtable_origin(tcx, cdata))
                         }).unwrap()
                     )
                   }

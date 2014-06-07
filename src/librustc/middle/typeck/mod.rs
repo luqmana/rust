@@ -197,6 +197,12 @@ pub enum vtable_origin {
       and the second is the bound number (identifying baz)
      */
     vtable_param(param_index, uint),
+
+    /*
+      With object coercions we may generate vtables twice.
+      Once for the base expression and again for the adjusted one.
+     */
+    vtable_coerced_obj(Box<vtable_origin>, Box<vtable_origin>)
 }
 
 impl Repr for vtable_origin {
@@ -212,6 +218,10 @@ impl Repr for vtable_origin {
 
             vtable_param(x, y) => {
                 format!("vtable_param({:?}, {:?})", x, y)
+            }
+
+            vtable_coerced_obj(ref base, ref adjusted) => {
+                format!("vtable_coerced_obj({}, {})", base.repr(tcx), adjusted.repr(tcx))
             }
         }
     }

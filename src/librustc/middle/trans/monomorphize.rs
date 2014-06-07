@@ -313,7 +313,9 @@ pub fn make_vtable_id(_ccx: &CrateContext,
                       origin: &typeck::vtable_origin)
                       -> MonoId {
     match origin {
-        &typeck::vtable_static(impl_id, ref substs, _) => {
+        &typeck::vtable_static(impl_id, ref substs, _) |
+        &typeck::vtable_coerced_obj(_,
+                box typeck::vtable_static(impl_id, ref substs, _)) => {
             MonoId {
                 def: impl_id,
                 params: substs.tps.iter().map(|subst| *subst).collect()

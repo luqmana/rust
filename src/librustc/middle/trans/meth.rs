@@ -195,7 +195,7 @@ pub fn trans_static_method_callee(bcx: &Block,
         typeck::vtable_static(impl_did, rcvr_substs, rcvr_origins) => {
             assert!(rcvr_substs.tps.iter().all(|t| !ty::type_needs_infer(*t)));
 
-            let mth_id = method_with_name(ccx, impl_did, mname);
+            let mth_id = method_with_name(ccx, impl_did, mname).unwrap();
             let (callee_substs, callee_origins) =
                 combine_impl_and_methods_tps(
                     bcx, mth_id, ExprId(expr_id),
@@ -218,20 +218,23 @@ pub fn trans_static_method_callee(bcx: &Block,
 
 fn method_with_name(ccx: &CrateContext,
                     impl_id: ast::DefId,
-                    name: ast::Name) -> ast::DefId {
+                    name: ast::Name) -> Option<ast::DefId> {
     match ccx.impl_method_cache.borrow().find_copy(&(impl_id, name)) {
-        Some(m) => return m,
+        Some(m) => return Some(m),
         None => {}
     }
 
     let methods = ccx.tcx.impl_methods.borrow();
     let methods = methods.find(&impl_id)
                          .expect("could not find impl while translating");
-    let meth_did = methods.iter().find(|&did| ty::method(&ccx.tcx, *did).ident.name == name)
-                                 .expect("could not find method while translating");
+    let meth_did = methods.iter().find(|&did| ty::method(&ccx.tcx, *did).ident.name == name);
+    if meth_did.is_none() {
+        return None;
+    }
 
-    ccx.impl_method_cache.borrow_mut().insert((impl_id, name), *meth_did);
-    *meth_did
+    let meth_did = *meth_did.unwrap();
+    ccx.impl_method_cache.borrow_mut().insert((impl_id, name), meth_did);
+    Some(meth_did)
 }
 
 fn trans_monomorphized_callee<'a>(bcx: &'a Block<'a>,
@@ -241,31 +244,59 @@ fn trans_monomorphized_callee<'a>(bcx: &'a Block<'a>,
                                   vtbl: typeck::vtable_origin)
                                   -> Callee<'a> {
     let _icx = push_ctxt("meth::trans_monomorphized_callee");
+    let ccx = bcx.ccx();
+    let mname = ty::trait_method(ccx.tcx(), trait_id, n_method).ident;
+    let monomorphized_callee = |rs, ro, mth_id| {
+        // create a concatenated set of substitutions which includes
+        // those from the impl and those from the method
+        let (callee_substs, callee_origins) =
+            combine_impl_and_methods_tps(
+                bcx, mth_id, MethodCall(method_call),
+                rs, ro);
+
+        // translate the function
+        let llfn = trans_fn_ref_with_vtables(bcx,
+                                             mth_id,
+                                             MethodCall(method_call),
+                                             callee_substs,
+                                             callee_origins);
+        Callee { bcx: bcx, data: Fn(llfn) }
+    };
     match vtbl {
       typeck::vtable_static(impl_did, rcvr_substs, rcvr_origins) => {
-          let ccx = bcx.ccx();
-          let mname = ty::trait_method(ccx.tcx(), trait_id, n_method).ident;
-          let mth_id = method_with_name(bcx.ccx(), impl_did, mname.name);
-
-          // create a concatenated set of substitutions which includes
-          // those from the impl and those from the method:
-          let (callee_substs, callee_origins) =
-              combine_impl_and_methods_tps(
-                  bcx, mth_id,  MethodCall(method_call),
-                  rcvr_substs, rcvr_origins);
-
-          // translate the function
-          let llfn = trans_fn_ref_with_vtables(bcx,
-                                               mth_id,
-                                               MethodCall(method_call),
-                                               callee_substs,
-                                               callee_origins);
-
-          Callee { bcx: bcx, data: Fn(llfn) }
+          let mth_id = method_with_name(bcx.ccx(), impl_did, mname.name)
+                           .expect(format!("could not find method def for `{}`",
+                                           token::get_ident(mname)).as_slice());
+          monomorphized_callee(rcvr_substs, rcvr_origins, mth_id)
       }
       typeck::vtable_param(..) => {
-          fail!("vtable_param left in monomorphized function's vtable substs");
+          ccx.sess().bug("vtable_param left in monomorphized function's vtable substs")
       }
+      typeck::vtable_coerced_obj(base, adjusted) => {
+          match base {
+              box typeck::vtable_static(impl_did, rs, ro) => {
+                  match method_with_name(ccx, impl_did, mname.name) {
+                      Some(mth_id) => {
+                          return monomorphized_callee(rs, ro, mth_id);
+                      }
+                      _ => {}
+                  }
+              }
+              _ => ccx.sess().bug("non-vtable_static in monomorphized function's vtable substs")
+          }
+          match adjusted {
+              box typeck::vtable_static(impl_did, rs, ro) => {
+                  match method_with_name(ccx, impl_did, mname.name) {
+                      Some(mth_id) => {
+                          return monomorphized_callee(rs, ro, mth_id);
+                      }
+                      _ => ccx.sess().bug(format!("could not find method def for `{}`",
+                                                   token::get_ident(mname)).as_slice())
+                  }
+              }
+              _ => ccx.sess().bug("non-vtable_static in monomorphized function's vtable substs")
+          }
+       }
     }
 }
 
@@ -439,7 +470,8 @@ fn get_vtable(bcx: &Block,
     // Not in the cache. Actually build it.
     let methods = origins.move_iter().flat_map(|origin| {
         match origin {
-            typeck::vtable_static(id, substs, sub_vtables) => {
+            typeck::vtable_static(id, substs, sub_vtables) |
+            typeck::vtable_coerced_obj(_, box typeck::vtable_static(id, substs, sub_vtables)) => {
                 emit_vtable_methods(bcx, id, substs, sub_vtables).move_iter()
             }
             _ => ccx.sess().bug("get_vtable: expected a static origin"),
@@ -497,7 +529,7 @@ fn emit_vtable_methods(bcx: &Block,
         let ident = ty::method(tcx, *method_def_id).ident;
         // The substitutions we have are on the impl, so we grab
         // the method type from the impl to substitute into.
-        let m_id = method_with_name(ccx, impl_id, ident.name);
+        let m_id = method_with_name(ccx, impl_id, ident.name).unwrap();
         let m = ty::method(tcx, m_id);
         debug!("(making impl vtable) emitting method {} at subst {}",
                m.repr(tcx),

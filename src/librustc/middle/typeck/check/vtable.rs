@@ -20,7 +20,7 @@ use middle::typeck::infer::fixup_err_to_str;
 use middle::typeck::infer::{resolve_and_force_all_but_regions, resolve_type};
 use middle::typeck::infer;
 use middle::typeck::{vtable_origin, vtable_res, vtable_param_res};
-use middle::typeck::{vtable_static, vtable_param, impl_res};
+use middle::typeck::{vtable_static, vtable_param, vtable_coerced_obj, impl_res};
 use middle::typeck::{param_numbered, param_self, param_index};
 use middle::typeck::MethodCall;
 use middle::subst;
@@ -30,6 +30,7 @@ use util::ppaux;
 use util::ppaux::Repr;
 
 use std::rc::Rc;
+use std::mem;
 use std::collections::HashSet;
 use syntax::ast;
 use syntax::ast_util;
@@ -517,7 +518,19 @@ fn connect_trait_tps(vcx: &VtableContext,
 fn insert_vtables(fcx: &FnCtxt, vtable_key: MethodCall, vtables: vtable_res) {
     debug!("insert_vtables(vtable_key={}, vtables={:?})",
            vtable_key, vtables.repr(fcx.tcx()));
-    fcx.inh.vtable_map.borrow_mut().insert(vtable_key, vtables);
+    fcx.inh.vtable_map.borrow_mut().find_with_or_insert_with(
+        vtable_key, vtables,
+        |_, already, new| {
+             let old = mem::replace(already, Vec::new());
+             let vtables =
+                old.move_iter().zip(new.move_iter())
+                   .map(|(o, n)| o.move_iter().zip(n.move_iter())
+                                  .map(|(oi, ni)| vtable_coerced_obj(box oi, box ni)).collect())
+                   .collect();
+             mem::replace(already, vtables);
+        },
+        |_, v| v
+    );
 }
 
 pub fn early_resolve_expr(ex: &ast::Expr, fcx: &FnCtxt, is_early: bool) {

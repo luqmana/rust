@@ -212,6 +212,10 @@ impl TypeFoldable for typeck::vtable_origin {
             typeck::vtable_param(n, b) => {
                 typeck::vtable_param(n, b)
             }
+            typeck::vtable_coerced_obj(ref base, ref adjusted) => {
+                typeck::vtable_coerced_obj(box base.fold_with(folder),
+                                           box adjusted.fold_with(folder))
+            }
         }
     }
 }
