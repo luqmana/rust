@@ -1518,18 +1518,13 @@ pub fn trans_named_tuple_constructor<'a>(mut bcx: &'a Block<'a>,
                      ctor_ty.repr(tcx)).as_slice())
     };
 
-    // Get location to store the result. If the user does not care about
-    // the result, just make a stack slot
-    let llresult = match dest {
-        expr::SaveIn(d) => d,
-        expr::Ignore => {
-            if !type_is_zero_size(ccx, result_ty) {
-                alloc_ty(bcx, result_ty, "constructor_result")
-            } else {
-                C_undef(type_of::type_of(ccx, result_ty))
-            }
-        }
-    };
+    // Get location to store the result.
+    let llresult =
+        if !type_is_zero_size(ccx, result_ty) {
+            alloc_ty(bcx, result_ty, "constructor_result")
+        } else {
+            C_undef(type_of::type_of(ccx, result_ty))
+        };
 
     if !type_is_zero_size(ccx, result_ty) {
         let repr = adt::represent_type(ccx, result_ty);
@@ -1546,10 +1541,10 @@ pub fn trans_named_tuple_constructor<'a>(mut bcx: &'a Block<'a>,
 
     // If the caller doesn't care about the result
     // drop the temporary we made
-    let bcx = match dest {
-        expr::SaveIn(_) => bcx,
-        expr::Ignore => glue::drop_ty(bcx, llresult, result_ty)
-    };
+    match dest {
+        expr::SaveIn(lldest) => store_ty(bcx, Load(bcx, llresult), lldest, result_ty),
+        expr::Ignore => bcx = glue::drop_ty(bcx, llresult, result_ty)
+    }
 
     Result::new(bcx, llresult)
 }
