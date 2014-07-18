@@ -320,22 +320,25 @@ pub fn trans_cont<'a>(bcx: &'a Block<'a>,
     return trans_break_cont(bcx, expr_id, label_opt, cleanup::EXIT_LOOP);
 }
 
-pub fn trans_ret<'a>(bcx: &'a Block<'a>,
-                     e: Option<Gc<ast::Expr>>)
+pub fn trans_ret<'a>(mut bcx: &'a Block<'a>,
+                     e: Option<Gc<ast::Expr>>,
+                     ret_ty: ty::t)
                      -> &'a Block<'a> {
     let _icx = push_ctxt("trans_ret");
     let fcx = bcx.fcx;
-    let mut bcx = bcx;
-    let dest = match bcx.fcx.llretptr.get() {
+
+    let dest = match fcx.llretptr.get() {
         None => expr::Ignore,
-        Some(retptr) => expr::SaveIn(retptr),
-    };
-    match e {
-        Some(x) => {
-            bcx = expr::trans_into(bcx, &*x, dest);
+        Some(_) => {
+            let mut retptr = fcx.llexplicit_ret_ptrs.borrow_mut();
+            let slot = alloc_ty(bcx, ret_ty, "ret_expr");
+            retptr.push((bcx.llbb, slot));
+            expr::SaveIn(slot)
         }
-        _ => {}
-    }
+    };
+
+    bcx = e.map_or(bcx, |x| expr::trans_into(bcx, &*x, dest));
+
     let cleanup_llbb = fcx.return_exit_block();
     Br(bcx, cleanup_llbb);
     Unreachable(bcx);

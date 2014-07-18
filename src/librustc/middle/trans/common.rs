@@ -239,6 +239,8 @@ pub struct FunctionContext<'a> {
     // always be Some.
     pub llretptr: Cell<Option<ValueRef>>,
 
+    pub llexplicit_ret_ptrs: RefCell<Vec<(BasicBlockRef, ValueRef)>>,
+
     // These pub elements: "hoisted basic blocks" containing
     // administrative activities that have to happen in only one place in
     // the function, due to LLVM's quirks.

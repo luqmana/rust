@@ -1187,6 +1187,7 @@ pub fn new_fn_ctxt<'a>(ccx: &'a CrateContext,
           llfn: llfndecl,
           llenv: None,
           llretptr: Cell::new(None),
+          llexplicit_ret_ptrs: RefCell::new(Vec::new()),
           alloca_insert_pt: Cell::new(None),
           llreturn: Cell::new(None),
           personality: Cell::new(None),
@@ -1340,12 +1341,35 @@ pub fn finish_fn<'a>(fcx: &'a FunctionContext<'a>,
 
 // Builds the return block for a function.
 pub fn build_return_block(fcx: &FunctionContext, ret_cx: &Block, retty: ty::t) {
-    // Return the value if this function immediate; otherwise, return void.
-    if fcx.llretptr.get().is_none() || fcx.caller_expects_out_pointer {
+    if fcx.llretptr.get().is_none() {
         return RetVoid(ret_cx);
     }
 
     let retptr = Value(fcx.llretptr.get().unwrap());
+    let llretty = type_of::type_of(fcx.ccx, retty);
+
+    // If we had an explicit return then we need to move it to retptr
+    let explicit_ret_ptrs = fcx.llexplicit_ret_ptrs.borrow();
+    let retbbs = explicit_ret_ptrs.iter().map(|&(bb, _)| bb).collect::<Vec<_>>();
+    let retvals = explicit_ret_ptrs.iter()
+        .map(|&(_, v)| PointerCast(ret_cx, v, llretty.ptr_to())).collect::<Vec<_>>();
+
+    debug!("ret type: {}", ret_cx.llty_str(llretty.ptr_to()));
+    for r in retvals.iter() {
+        debug!("Got a retval: {}", ret_cx.val_to_string(*r));
+    }
+    if !retvals.is_empty() {
+        let eretptr = Phi(ret_cx, type_of::type_of(fcx.ccx, retty).ptr_to(),
+                          retvals.as_slice(), retbbs.as_slice());
+        let retval = load_ty(ret_cx, eretptr, retty);
+        store_ty(ret_cx, retval, retptr.get(), retty);
+    }
+
+    // If this function uses an outpointer then we return void
+    if fcx.caller_expects_out_pointer {
+        return RetVoid(ret_cx);
+    }
+
     let retval = match retptr.get_dominating_store(ret_cx) {
         // If there's only a single store to the ret slot, we can directly return
         // the value that was stored and omit the store and the alloca
@@ -1364,7 +1388,7 @@ pub fn build_return_block(fcx: &FunctionContext, ret_cx: &Block, retty: ty::t) {
             }
         }
         // Otherwise, load the return value from the ret slot
-        None => load_ty(ret_cx, fcx.llretptr.get().unwrap(), retty)
+        None => load_ty(ret_cx, retptr.get(), retty)
     };
 
     Ret(ret_cx, retval);

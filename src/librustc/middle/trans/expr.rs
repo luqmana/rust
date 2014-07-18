@@ -660,7 +660,8 @@ fn trans_rvalue_stmt_unadjusted<'a>(bcx: &'a Block<'a>,
             controlflow::trans_cont(bcx, expr.id, label_opt)
         }
         ast::ExprRet(ex) => {
-            controlflow::trans_ret(bcx, ex)
+            let ret_ty = ex.map_or(ty::mk_nil(), |e| expr_ty_adjusted(bcx, &*e));
+            controlflow::trans_ret(bcx, ex, ret_ty)
         }
         ast::ExprWhile(ref cond, ref body) => {
             controlflow::trans_while(bcx, expr.id, &**cond, &**body)
