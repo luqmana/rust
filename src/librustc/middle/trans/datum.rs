@@ -15,7 +15,6 @@
 
 use llvm::ValueRef;
 use middle::trans::base::*;
-use middle::trans::build::Load;
 use middle::trans::common::*;
 use middle::trans::cleanup;
 use middle::trans::cleanup::CleanupMethods;
@@ -518,7 +517,7 @@ impl Datum<Lvalue> {
         let val = match ty::get(self.ty).sty {
             _ if ty::type_is_sized(bcx.tcx(), self.ty) => gep(self.val),
             ty::ty_open(_) => {
-                let base = Load(bcx, expr::get_dataptr(bcx, self.val));
+                let base = expr::get_dataptr(bcx, self.val);
                 gep(base)
             }
             _ => bcx.tcx().sess.bug(

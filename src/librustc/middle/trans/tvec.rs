@@ -33,16 +33,6 @@ use util::ppaux::ty_to_string;
 use syntax::ast;
 use syntax::parse::token::InternedString;
 
-fn get_len(bcx: Block, vptr: ValueRef) -> ValueRef {
-    let _icx = push_ctxt("tvec::get_lenl");
-    Load(bcx, expr::get_len(bcx, vptr))
-}
-
-fn get_dataptr(bcx: Block, vptr: ValueRef) -> ValueRef {
-    let _icx = push_ctxt("tvec::get_dataptr");
-    Load(bcx, expr::get_dataptr(bcx, vptr))
-}
-
 pub fn pointer_add_byte(bcx: Block, ptr: ValueRef, bytes: ValueRef) -> ValueRef {
     let _icx = push_ctxt("tvec::pointer_add_byte");
     let old_ty = val_ty(ptr);
@@ -61,9 +51,9 @@ pub fn make_drop_glue_unboxed<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
         let tcx = bcx.tcx();
         let _icx = push_ctxt("tvec::make_drop_glue_unboxed");
 
-        let dataptr = get_dataptr(bcx, vptr);
+        let dataptr = expr::get_dataptr(bcx, vptr);
         let bcx = if ty::type_needs_drop(tcx, unit_ty) {
-            let len = get_len(bcx, vptr);
+            let len = expr::get_len(bcx, vptr);
             iter_vec_raw(bcx, dataptr, unit_ty, len, |bb, vv, tt| glue::drop_ty(bb, vv, tt, None))
         } else {
             bcx
@@ -73,7 +63,7 @@ pub fn make_drop_glue_unboxed<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
             let llty = type_of::type_of(ccx, unit_ty);
             let unit_size = llsize_of_alloc(ccx, llty);
             if unit_size != 0 {
-                let len = get_len(bcx, vptr);
+                let len = expr::get_len(bcx, vptr);
                 let not_empty = ICmp(bcx, llvm::IntNE, len, C_uint(ccx, 0));
                 with_cond(bcx, not_empty, |bcx| {
                     let llalign = C_uint(ccx, machine::llalign_of_min(ccx, llty) as uint);
@@ -392,7 +382,7 @@ pub fn get_fixed_base_and_len(bcx: Block,
 
     let ccx = bcx.ccx();
 
-    let base = expr::get_dataptr(bcx, llval);
+    let base = expr::get_dataptr_ptr(bcx, llval);
     let len = C_uint(ccx, vec_length);
     (base, len)
 }
@@ -400,8 +390,8 @@ pub fn get_fixed_base_and_len(bcx: Block,
 fn get_slice_base_and_len(bcx: Block,
                           llval: ValueRef)
                           -> (ValueRef, ValueRef) {
-    let base = Load(bcx, GEPi(bcx, llval, [0u, abi::slice_elt_base]));
-    let len = Load(bcx, GEPi(bcx, llval, [0u, abi::slice_elt_len]));
+    let base = expr::get_dataptr(bcx, llval);
+    let len = expr::get_len(bcx, llval);
     (base, len)
 }
 

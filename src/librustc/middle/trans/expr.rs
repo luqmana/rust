@@ -165,12 +165,24 @@ pub fn trans<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
     return DatumBlock::new(bcx, datum);
 }
 
-pub fn get_len(bcx: Block, fat_ptr: ValueRef) -> ValueRef {
+pub fn get_len_ptr(bcx: Block, fat_ptr: ValueRef) -> ValueRef {
     GEPi(bcx, fat_ptr, [0u, abi::slice_elt_len])
 }
 
-pub fn get_dataptr(bcx: Block, fat_ptr: ValueRef) -> ValueRef {
+pub fn get_dataptr_ptr(bcx: Block, fat_ptr: ValueRef) -> ValueRef {
     GEPi(bcx, fat_ptr, [0u, abi::slice_elt_base])
+}
+
+pub fn get_len(bcx: Block, fat_ptr: ValueRef) -> ValueRef {
+    Load(bcx, get_len_ptr(bcx, fat_ptr))
+}
+
+pub fn get_dataptr(bcx: Block, fat_ptr: ValueRef) -> ValueRef {
+    let ptr = Load(bcx, get_dataptr_ptr(bcx, fat_ptr));
+    let assume = bcx.ccx().get_intrinsic(&"llvm.assume");
+    let not_null = IsNotNull(bcx, ptr);
+    Call(bcx, assume, [not_null], None);
+    ptr
 }
 
 fn apply_adjustments<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
@@ -379,8 +391,8 @@ fn apply_adjustments<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
                                -> DatumBlock<'blk, 'tcx, Expr> {
         let tcx = bcx.tcx();
         let dest_ty = ty::close_type(tcx, datum.ty);
-        let base = |bcx, val| Load(bcx, get_dataptr(bcx, val));
-        let len = |bcx, val| Load(bcx, get_len(bcx, val));
+        let base = |bcx, val| get_dataptr(bcx, val);
+        let len = |bcx, val| get_len(bcx, val);
         into_fat_ptr(bcx, expr, datum, dest_ty, base, len)
     }
 
@@ -400,8 +412,8 @@ fn apply_adjustments<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
         let info = info(bcx, lval.val);
 
         let scratch = rvalue_scratch_datum(bcx, dest_ty, "__fat_ptr");
-        Store(bcx, base, get_dataptr(bcx, scratch.val));
-        Store(bcx, info, get_len(bcx, scratch.val));
+        Store(bcx, base, get_dataptr_ptr(bcx, scratch.val));
+        Store(bcx, info, get_len_ptr(bcx, scratch.val));
 
         DatumBlock::new(bcx, scratch.to_expr_datum())
     }
@@ -424,13 +436,13 @@ fn apply_adjustments<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
         let vec_ty = ty::mk_uniq(tcx, ty::mk_vec(tcx, unit_ty, None));
         let scratch = rvalue_scratch_datum(bcx, vec_ty, "__unsize_unique");
 
-        let base = get_dataptr(bcx, scratch.val);
+        let base = get_dataptr_ptr(bcx, scratch.val);
         let base = PointerCast(bcx,
                                base,
                                type_of::type_of(bcx.ccx(), datum_ty).ptr_to());
         bcx = lval.store_to(bcx, base);
 
-        Store(bcx, ll_len, get_len(bcx, scratch.val));
+        Store(bcx, ll_len, get_len_ptr(bcx, scratch.val));
         DatumBlock::new(bcx, scratch.to_expr_datum())
     }
 
@@ -455,11 +467,11 @@ fn apply_adjustments<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
 
         let scratch = rvalue_scratch_datum(bcx, result_ty, "__uniq_fat_ptr");
         let llbox_ty = type_of::type_of(bcx.ccx(), datum_ty);
-        let base = PointerCast(bcx, get_dataptr(bcx, scratch.val), llbox_ty.ptr_to());
+        let base = PointerCast(bcx, get_dataptr_ptr(bcx, scratch.val), llbox_ty.ptr_to());
         bcx = lval.store_to(bcx, base);
 
         let info = unsized_info(bcx, k, expr.id, unboxed_ty, |t| ty::mk_uniq(tcx, t));
-        Store(bcx, info, get_len(bcx, scratch.val));
+        Store(bcx, info, get_len_ptr(bcx, scratch.val));
 
         let scratch = unpack_datum!(bcx,
                                     scratch.to_expr_datum().to_lvalue_datum(bcx,
@@ -693,9 +705,9 @@ fn trans_field<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
             DatumBlock { datum: d.to_expr_datum(), bcx: bcx }
         } else {
             let scratch = rvalue_scratch_datum(bcx, ty::mk_open(bcx.tcx(), d.ty), "");
-            Store(bcx, d.val, get_dataptr(bcx, scratch.val));
-            let info = Load(bcx, get_len(bcx, base_datum.val));
-            Store(bcx, info, get_len(bcx, scratch.val));
+            Store(bcx, d.val, get_dataptr_ptr(bcx, scratch.val));
+            let info = get_len(bcx, base_datum.val);
+            Store(bcx, info, get_len_ptr(bcx, scratch.val));
 
             DatumBlock::new(bcx, scratch.to_expr_datum())
 
@@ -1582,11 +1594,11 @@ fn trans_addr_of<'blk, 'tcx>(bcx: Block<'blk, 'tcx>,
             let scratch = rvalue_scratch_datum(bcx,
                                                ty::close_type(bcx.tcx(), sub_datum.ty),
                                                "fat_addr_of");
-            let base = Load(bcx, get_dataptr(bcx, sub_datum.val));
-            Store(bcx, base, get_dataptr(bcx, scratch.val));
+            let base = get_dataptr(bcx, sub_datum.val);
+            Store(bcx, base, get_dataptr_ptr(bcx, scratch.val));
 
-            let len = Load(bcx, get_len(bcx, sub_datum.val));
-            Store(bcx, len, get_len(bcx, scratch.val));
+            let len = get_len(bcx, sub_datum.val);
+            Store(bcx, len, get_len_ptr(bcx, scratch.val));
 
             DatumBlock::new(bcx, scratch.to_expr_datum())
         }

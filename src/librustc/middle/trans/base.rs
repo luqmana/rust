@@ -1055,7 +1055,7 @@ pub fn load_ty(cx: Block, ptr: ValueRef, t: ty::t) -> ValueRef {
      * handles various special cases where the type gives us better information
      * about what we are loading.
      */
-    if type_is_zero_size(cx.ccx(), t) {
+    let val = if type_is_zero_size(cx.ccx(), t) {
         C_undef(type_of::type_of(cx.ccx(), t))
     } else if ty::type_is_bool(t) {
         Trunc(cx, LoadRangeAssert(cx, ptr, 0, 2, llvm::False), Type::i1(cx.ccx()))
@@ -1065,7 +1065,18 @@ pub fn load_ty(cx: Block, ptr: ValueRef, t: ty::t) -> ValueRef {
         LoadRangeAssert(cx, ptr, 0, 0x10FFFF + 1, llvm::False)
     } else {
         Load(cx, ptr)
+    };
+
+    match ty::get(t).sty {
+        ty::ty_uniq(_) | ty::ty_rptr(..) => {
+            let assume = cx.ccx().get_intrinsic(&"llvm.assume");
+            let not_null = ICmp(cx, llvm::IntNE, val, C_null(val_ty(val)));
+            Call(cx, assume, [not_null], None);
+        }
+        _ => {}
     }
+
+    val
 }
 
 pub fn store_ty(cx: Block, v: ValueRef, dst: ValueRef, t: ty::t) {
