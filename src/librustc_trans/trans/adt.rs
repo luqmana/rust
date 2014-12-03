@@ -50,7 +50,9 @@ use std::num::Int;
 use std::rc::Rc;
 
 use llvm::{ValueRef, True, IntEQ, IntNE};
-use back::abi;
+use back::abi::FAT_PTR_ADDR;
+use metadata::csearch;
+use middle::astencode;
 use middle::subst;
 use middle::subst::Subst;
 use trans::_match;
@@ -64,8 +66,8 @@ use trans::type_::Type;
 use trans::type_of;
 use middle::ty::{mod, Ty};
 use middle::ty::Disr;
-use syntax::ast;
-use syntax::attr;
+use syntax::{ast, ast_map, ast_util, attr};
+use syntax::attr::AttrMetaMethods;
 use syntax::attr::IntType;
 use util::ppaux::ty_to_string;
 
@@ -284,7 +286,7 @@ struct Case<'tcx> {
 #[deriving(Eq, PartialEq, Show)]
 pub enum PointerField {
     ThinPointer(uint),
-    FatPointer(uint)
+    FatPointer(uint, uint)
 }
 
 impl<'tcx> Case<'tcx> {
@@ -298,13 +300,13 @@ impl<'tcx> Case<'tcx> {
                 // &T/&mut T/Box<T> could either be a thin or fat pointer depending on T
                 ty::ty_rptr(_, ty::mt { ty, .. }) | ty::ty_uniq(ty) => match ty.sty {
                     // &[T] and &str are a pointer and length pair
-                    ty::ty_vec(_, None) | ty::ty_str => return Some(FatPointer(i)),
+                    ty::ty_vec(_, None) | ty::ty_str => return Some(FatPointer(i, FAT_PTR_ADDR)),
 
                     // &Trait is a pair of pointers: the actual object and a vtable
-                    ty::ty_trait(..) => return Some(FatPointer(i)),
+                    ty::ty_trait(..) => return Some(FatPointer(i, FAT_PTR_ADDR)),
 
                     ty::ty_struct(..) if !ty::type_is_sized(cx.tcx(), ty) => {
-                        return Some(FatPointer(i))
+                        return Some(FatPointer(i, FAT_PTR_ADDR))
                     }
 
                     // Any other &T is just a pointer
@@ -315,7 +317,32 @@ impl<'tcx> Case<'tcx> {
                 ty::ty_bare_fn(..) => return Some(ThinPointer(i)),
 
                 // Closures are a pair of pointers: the code and environment
-                ty::ty_closure(..) => return Some(FatPointer(i)),
+                ty::ty_closure(..) => return Some(FatPointer(i, FAT_PTR_ADDR)),
+
+                // Is this a struct with a raw pointer marked as non-null?
+                ty::ty_struct(def_id, _) => {
+                    if ast_util::is_local(def_id) {
+                        if let Some(ast_map::NodeItem(it)) = cx.tcx().map.find(def_id.node) {
+                            if let ast::ItemStruct(ref s, _) = it.node {
+                                if let Some(j) = struct_has_nonnull_ptr_field(cx.tcx(), &**s) {
+                                    return Some(FatPointer(i, j));
+                                }
+                            }
+                        }
+                    } else {
+                        match csearch::maybe_get_item_ast(cx.tcx(), def_id,
+                            |a, b, c, d| astencode::decode_inlined_item(a, b, c, d)) {
+                            csearch::found(&ast::IIItem(ref item)) => {
+                                if let ast::ItemStruct(ref s, _) = item.node {
+                                    if let Some(j) = struct_has_nonnull_ptr_field(cx.tcx(), &**s) {
+                                        return Some(FatPointer(i, j));
+                                    }
+                                }
+                            },
+                            _ => continue
+                        }
+                    }
+                }
 
                 // Anything else is not a pointer
                 _ => continue
@@ -324,6 +351,32 @@ impl<'tcx> Case<'tcx> {
 
         None
     }
+}
+
+fn struct_has_nonnull_ptr_field<'tcx, 'a>(tcx: &ty::ctxt<'tcx>,
+                                          struct_def: &'a ast::StructDef) -> Option<uint> {
+    for (j, field) in struct_def.fields.iter().enumerate() {
+        let ty_id = field.node.ty.id;
+        let att_cache = tcx.ast_ty_to_ty_cache.borrow();
+        if let Some(&ty::atttce_resolved(ty)) = att_cache.get(&ty_id) {
+            match ty.sty {
+                // Is this a pointer field that's been specifically
+                // marked as non-null?
+                ty::ty_ptr(_) => {
+                    if field.node.attrs.iter().any(|attr|
+                            attr.node.value.check_name("nonnull")) {
+                        return Some(j);
+                    } else {
+                        continue
+                    }
+                },
+                // Not a non-null pointer
+                _ => continue
+            }
+        }
+    }
+
+    None
 }
 
 fn get_cases<'tcx>(tcx: &ty::ctxt<'tcx>,
@@ -668,7 +721,7 @@ fn struct_wrapped_nullable_bitdiscr(bcx: Block, nndiscr: Disr, ptrfield: Pointer
                                     scrutinee: ValueRef) -> ValueRef {
     let llptrptr = match ptrfield {
         ThinPointer(field) => GEPi(bcx, scrutinee, &[0, field]),
-        FatPointer(field) => GEPi(bcx, scrutinee, &[0, field, abi::FAT_PTR_ADDR])
+        FatPointer(field, subfield) => GEPi(bcx, scrutinee, &[0, field, subfield])
     };
     let llptr = Load(bcx, llptrptr);
     let cmp = if nndiscr == 0 { IntEQ } else { IntNE };
@@ -761,8 +814,8 @@ pub fn trans_set_discr<'blk, 'tcx>(bcx: Block<'blk, 'tcx>, r: &Repr<'tcx>,
                     ThinPointer(field) =>
                         (GEPi(bcx, val, &[0, field]),
                          type_of::type_of(bcx.ccx(), nonnull.fields[field])),
-                    FatPointer(field) => {
-                        let v = GEPi(bcx, val, &[0, field, abi::FAT_PTR_ADDR]);
+                    FatPointer(field, subfield) => {
+                        let v = GEPi(bcx, val, &[0, field, subfield]);
                         (v, val_ty(v).element_type())
                     }
                 };
@@ -1090,7 +1143,7 @@ pub fn const_get_discrim(ccx: &CrateContext, r: &Repr, val: ValueRef)
         StructWrappedNullablePointer { nndiscr, ptrfield, .. } => {
             let (idx, sub_idx) = match ptrfield {
                 ThinPointer(field) => (field, None),
-                FatPointer(field) => (field, Some(abi::FAT_PTR_ADDR))
+                FatPointer(field, subfield) => (field, Some(subfield))
             };
             if is_null(const_struct_field(ccx, val, idx, sub_idx)) {
                 /* subtraction as uint is ok because nndiscr is either 0 or 1 */
