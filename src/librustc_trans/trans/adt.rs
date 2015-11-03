@@ -48,8 +48,7 @@ use std::rc::Rc;
 use llvm::{ValueRef, True, IntEQ, IntNE};
 use back::abi::FAT_PTR_ADDR;
 use middle::subst;
-use middle::ty::{self, Ty};
-use middle::ty::Disr;
+use middle::ty::{self, Disr, Ty};
 use syntax::ast;
 use syntax::attr;
 use syntax::attr::IntType;
@@ -311,7 +310,7 @@ fn represent_type_uncached<'a, 'tcx>(cx: &CrateContext<'a, 'tcx>,
                     if cases[1 - discr].is_zerolen(cx, t) {
                         let st = mk_struct(cx, &cases[discr].tys,
                                            false, t);
-                        match cases[discr].find_ptr(cx) {
+                        match cases[discr].find_non_null_index(cx) {
                             Some(ref df) if df.len() == 1 && st.fields.len() == 1 => {
                                 return RawNullablePointer {
                                     nndiscr: discr as Disr,
@@ -320,8 +319,9 @@ fn represent_type_uncached<'a, 'tcx>(cx: &CrateContext<'a, 'tcx>,
                                 };
                             }
                             Some(mut discrfield) => {
-                                discrfield.push(0);
-                                discrfield.reverse();
+                                // Need to add zero index to the beginning to
+                                // account for the initial GEPi index
+                                discrfield.insert(0, 0);
                                 return StructWrappedNullablePointer {
                                     nndiscr: discr as Disr,
                                     nonnull: st,
@@ -421,89 +421,96 @@ struct Case<'tcx> {
 /// This represents the (GEP) indices to follow to get to the discriminant field
 pub type DiscrField = Vec<usize>;
 
-fn find_discr_field_candidate<'tcx>(tcx: &ty::ctxt<'tcx>,
-                                    ty: Ty<'tcx>,
-                                    mut path: DiscrField) -> Option<DiscrField> {
+/// Walk `ty` until we find a suitable non-null field.
+fn find_non_null_field<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
+                                 ty: Ty<'tcx>,
+                                 path: &mut DiscrField) -> bool {
+    let tcx = ccx.tcx();
     match ty.sty {
-        // Fat &T/&mut T/Box<T> i.e. T is [T], str, or Trait
+        // For fat pointers (&T/&mut T/Box<T> i.e. T is [T], str, or Trait)
+        // we use the data ptr of the two word pair
         ty::TyRef(_, ty::TypeAndMut { ty, .. }) | ty::TyBox(ty) if !type_is_sized(tcx, ty) => {
             path.push(FAT_PTR_ADDR);
-            Some(path)
-        },
+            true
+        }
 
-        // Regular thin pointer: &T/&mut T/Box<T>
-        ty::TyRef(..) | ty::TyBox(..) => Some(path),
+        // Thin pointers &T/&mut T/Box<T> are never null so just use em directly
+        ty::TyRef(..) | ty::TyBox(..) => true,
 
-        // Functions are just pointers
-        ty::TyBareFn(..) => Some(path),
+        // Similarly for regular functions
+        ty::TyBareFn(..) => true,
 
-        // Is this the NonZero lang item wrapping a pointer or integer type?
+        // We also treat raw pointers / integers as non null if wrapped in NonZero
         ty::TyStruct(def, substs) if Some(def.did) == tcx.lang_items.non_zero() => {
             let nonzero_fields = &def.struct_variant().fields;
             assert_eq!(nonzero_fields.len(), 1);
-            let field_ty = monomorphize::field_ty(tcx, substs, &nonzero_fields[0]);
-            match field_ty.sty {
+            match monomorphize::field_ty(tcx, substs, &nonzero_fields[0]).sty {
+                // make sure to account for fat raw pointers
                 ty::TyRawPtr(ty::TypeAndMut { ty, .. }) if !type_is_sized(tcx, ty) => {
+                    // The first 0 index to account for the fact the we have to go
+                    // through the NonZero struct (0 - first field of it)
                     path.push_all(&[0, FAT_PTR_ADDR]);
-                    Some(path)
+                    true
                 },
                 ty::TyRawPtr(..) | ty::TyInt(..) | ty::TyUint(..) => {
+                    // Same as above
                     path.push(0);
-                    Some(path)
+                    true
                 },
-                _ => None
+                _ => false
             }
         },
 
-        // Perhaps one of the fields of this struct is non-zero
-        // let's recurse and find out
+        // We recurse through any struct fields to see if we can find a spot
         ty::TyStruct(def, substs) => {
             for (j, field) in def.struct_variant().fields.iter().enumerate() {
+                path.push(j);
                 let field_ty = monomorphize::field_ty(tcx, substs, field);
-                if let Some(mut fpath) = find_discr_field_candidate(tcx, field_ty, path.clone()) {
-                    fpath.push(j);
-                    return Some(fpath);
+                if find_non_null_field(ccx, field_ty, path) {
+                    return true;
                 }
+                path.pop();
             }
-            None
+            false
         },
 
-        // Perhaps one of the upvars of this struct is non-zero
-        // Let's recurse and find out!
+        // Similarly for closures, we look through it's upvars to find a suitable spot
         ty::TyClosure(_, ref substs) => {
             for (j, &ty) in substs.upvar_tys.iter().enumerate() {
-                if let Some(mut fpath) = find_discr_field_candidate(tcx, ty, path.clone()) {
-                    fpath.push(j);
-                    return Some(fpath);
+                path.push(j);
+                if find_non_null_field(ccx, ty, path) {
+                    return true;
                 }
+                path.pop();
             }
-            None
+            false
         },
 
-        // Can we use one of the fields in this tuple?
+        // We also look through tuples similarly
         ty::TyTuple(ref tys) => {
             for (j, &ty) in tys.iter().enumerate() {
-                if let Some(mut fpath) = find_discr_field_candidate(tcx, ty, path.clone()) {
-                    fpath.push(j);
-                    return Some(fpath);
+                path.push(j);
+                if find_non_null_field(ccx, ty, path) {
+                    return true;
                 }
+                path.pop();
             }
-            None
+            false
         },
 
-        // Is this a fixed-size array of something non-zero
+        // Do we have a fixed-size array of something non-nullable
         // with at least one element?
-        ty::TyArray(ety, d) if d > 0 => {
-            if let Some(mut vpath) = find_discr_field_candidate(tcx, ety, path) {
-                vpath.push(0);
-                Some(vpath)
-            } else {
-                None
+        ty::TyArray(ty, d) if d > 0 => {
+            path.push(0);
+            if find_non_null_field(ccx, ty, path) {
+                return true;
             }
+            path.pop();
+            false
         },
 
-        // Anything else is not a pointer
-        _ => None
+        // For anything else we just stop
+        _ => false
     }
 }
 
@@ -512,12 +519,14 @@ impl<'tcx> Case<'tcx> {
         mk_struct(cx, &self.tys, false, scapegoat).size == 0
     }
 
-    fn find_ptr<'a>(&self, cx: &CrateContext<'a, 'tcx>) -> Option<DiscrField> {
+    fn find_non_null_index<'a>(&self, cx: &CrateContext<'a, 'tcx>) -> Option<DiscrField> {
+        let mut path = vec![];
         for (i, &ty) in self.tys.iter().enumerate() {
-            if let Some(mut path) = find_discr_field_candidate(cx.tcx(), ty, vec![]) {
-                path.push(i);
+            path.push(i);
+            if find_non_null_field(cx, ty, &mut path) {
                 return Some(path);
             }
+            path.pop();
         }
         None
     }
