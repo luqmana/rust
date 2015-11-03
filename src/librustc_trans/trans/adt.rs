@@ -43,6 +43,7 @@
 
 pub use self::Repr::*;
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use llvm::{ValueRef, True, IntEQ, IntNE};
@@ -171,7 +172,7 @@ pub fn represent_type<'a, 'tcx>(cx: &CrateContext<'a, 'tcx>,
     }
 
     let repr = Rc::new(represent_type_uncached(cx, t));
-    debug!("Represented as: {:?}", repr);
+    debug!("Representing {} as: {:?}", t, repr);
     cx.adt_reprs().borrow_mut().insert(t, repr.clone());
     repr
 }
@@ -424,21 +425,28 @@ pub type DiscrField = Vec<usize>;
 /// Walk `ty` until we find a suitable non-null field.
 fn find_non_null_field<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
                                  ty: Ty<'tcx>,
-                                 path: &mut DiscrField) -> bool {
+                                 path: &mut DiscrField,
+                                 used: &mut HashSet<DiscrField>) -> bool {
+    debug!("find_non_nullfield(ty: {:?}, path: {:?}, used: {:?})", ty, path, used);
     let tcx = ccx.tcx();
     match ty.sty {
         // For fat pointers (&T/&mut T/Box<T> i.e. T is [T], str, or Trait)
         // we use the data ptr of the two word pair
         ty::TyRef(_, ty::TypeAndMut { ty, .. }) | ty::TyBox(ty) if !type_is_sized(tcx, ty) => {
             path.push(FAT_PTR_ADDR);
-            true
+            if used.contains(path) {
+                path.pop();
+                false
+            } else {
+                true
+            }
         }
 
         // Thin pointers &T/&mut T/Box<T> are never null so just use em directly
-        ty::TyRef(..) | ty::TyBox(..) => true,
+        ty::TyRef(..) | ty::TyBox(..) => !used.contains(path),
 
         // Similarly for regular functions
-        ty::TyBareFn(..) => true,
+        ty::TyBareFn(..) => !used.contains(path),
 
         // We also treat raw pointers / integers as non null if wrapped in NonZero
         ty::TyStruct(def, substs) if Some(def.did) == tcx.lang_items.non_zero() => {
@@ -450,12 +458,23 @@ fn find_non_null_field<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
                     // The first 0 index to account for the fact the we have to go
                     // through the NonZero struct (0 - first field of it)
                     path.push_all(&[0, FAT_PTR_ADDR]);
-                    true
+                    if used.contains(path) {
+                        path.pop();
+                        path.pop();
+                        false
+                    } else {
+                        true
+                    }
                 },
                 ty::TyRawPtr(..) | ty::TyInt(..) | ty::TyUint(..) => {
                     // Same as above
                     path.push(0);
-                    true
+                    if used.contains(path) {
+                        path.pop();
+                        false
+                    } else {
+                        true
+                    }
                 },
                 _ => false
             }
@@ -466,7 +485,7 @@ fn find_non_null_field<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
             for (j, field) in def.struct_variant().fields.iter().enumerate() {
                 path.push(j);
                 let field_ty = monomorphize::field_ty(tcx, substs, field);
-                if find_non_null_field(ccx, field_ty, path) {
+                if find_non_null_field(ccx, field_ty, path, used) {
                     return true;
                 }
                 path.pop();
@@ -478,7 +497,7 @@ fn find_non_null_field<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
         ty::TyClosure(_, ref substs) => {
             for (j, &ty) in substs.upvar_tys.iter().enumerate() {
                 path.push(j);
-                if find_non_null_field(ccx, ty, path) {
+                if find_non_null_field(ccx, ty, path, used) {
                     return true;
                 }
                 path.pop();
@@ -490,7 +509,7 @@ fn find_non_null_field<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
         ty::TyTuple(ref tys) => {
             for (j, &ty) in tys.iter().enumerate() {
                 path.push(j);
-                if find_non_null_field(ccx, ty, path) {
+                if find_non_null_field(ccx, ty, path, used) {
                     return true;
                 }
                 path.pop();
@@ -501,13 +520,49 @@ fn find_non_null_field<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
         // Do we have a fixed-size array of something non-nullable
         // with at least one element?
         ty::TyArray(ty, d) if d > 0 => {
-            path.push(0);
-            if find_non_null_field(ccx, ty, path) {
-                return true;
+            for j in 0..d {
+                path.push(j);
+                if find_non_null_field(ccx, ty, path, used) {
+                    return true;
+                }
+                path.pop();
             }
-            path.pop();
             false
         },
+
+        // Enums are a bit more tricky, but basically we see if
+        // we can further use anymore non null fields in optimized enums
+        ty::TyEnum(def, ref substs) => {
+            use syntax::parse::token;
+            let r = token::gensym("_").0;
+            debug!("[{}] enum case for ty {:?}", r, ty);
+            let cases = get_cases(tcx, def, substs);
+            match *represent_type(ccx, ty) {
+                StructWrappedNullablePointer { nndiscr, .. } => {
+
+                    // We don't want to reuse the same spot as this inner
+                    // enum so add the `DiscrField` to the used HashSet
+                    let mut in_path = path.clone();
+                    in_path.push_all(&cases[nndiscr as usize].find_non_null_index(ccx).unwrap());
+                    debug!("[{}] path: {:?}", r, path);
+                    debug!("[{}] in_path: {:?}", r, in_path);
+                    used.insert(in_path);
+
+                    for (j, &t) in cases[nndiscr as usize].tys.iter().enumerate() {
+                        path.push(j);
+                        if find_non_null_field(ccx, t, path, used) {
+                            debug!("[{}] Found non null field: {:?}", r, path);
+                            return true;
+                        }
+                        path.pop();
+                    }
+
+                    false
+                },
+
+                _ => false
+            }
+        }
 
         // For anything else we just stop
         _ => false
@@ -522,8 +577,10 @@ impl<'tcx> Case<'tcx> {
     fn find_non_null_index<'a>(&self, cx: &CrateContext<'a, 'tcx>) -> Option<DiscrField> {
         let mut path = vec![];
         for (i, &ty) in self.tys.iter().enumerate() {
+            debug!("find_non_null_index loop ty: {:?}", ty);
             path.push(i);
-            if find_non_null_field(cx, ty, &mut path) {
+            if find_non_null_field(cx, ty, &mut path, &mut HashSet::new()) {
+                debug!("find_non_null_index found path {:?} for ty {:?}", path, ty);
                 return Some(path);
             }
             path.pop();
