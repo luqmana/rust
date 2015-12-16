@@ -8,14 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use llvm::ValueRef;
+use llvm::{TypeKind, ValueRef};
 use rustc::middle::ty::{self, Ty};
 use middle::ty::cast::{CastTy, IntTy};
 use rustc::mir::repr as mir;
 
 use trans::asm;
 use trans::base;
-use trans::build;
+use trans::build::{self, BitCast, IntToPtr, PointerCast, PtrToInt};
 use trans::common::{self, Block, Result};
 use trans::debuginfo::DebugLoc;
 use trans::declare;
@@ -155,6 +155,8 @@ impl<'bcx, 'tcx> MirContext<'bcx, 'tcx> {
     {
         assert!(rvalue_creates_operand(rvalue), "cannot trans {:?} to operand", rvalue);
 
+        let ccx = bcx.ccx();
+        let tcx = bcx.tcx();
         match *rvalue {
             mir::Rvalue::Use(ref operand) => {
                 let operand = self.trans_operand(bcx, operand);
@@ -281,6 +283,85 @@ impl<'bcx, 'tcx> MirContext<'bcx, 'tcx> {
                             }
                         } else {
                             panic!("Unexpected non-FatPtr operand")
+                        }
+                    }
+                    mir::CastKind::Transmute => {
+                        use trans::common::{type_is_fat_ptr, type_is_immediate};
+
+                        let llval_ty =  type_of::type_of(bcx.ccx(), operand.ty);
+                        let llcast_ty = type_of::type_of(bcx.ccx(), cast_ty);
+
+                        assert_eq!(machine::llbitsize_of_real(bcx.ccx(), llval_ty),
+                                   machine::llbitsize_of_real(bcx.ccx(), llcast_ty));
+
+                        let nonpointer_nonaggregate = |llkind: TypeKind| -> bool {
+                            use llvm::TypeKind::*;
+                            match llkind {
+                                Half | Float | Double | X86_FP80 | FP128 |
+                                    PPC_FP128 | Integer | Vector | X86_MMX => true,
+                                _ => false
+                            }
+                        };
+
+                        let val_kind = llval_ty.kind();
+                        let cast_kind = llcast_ty.kind();
+
+                        match operand.val {
+                            // Cast Ref => Fat Ptr
+                            // ex: (*const T, usize) => &[T]
+                            OperandValue::Ref(r) if type_is_fat_ptr(tcx, cast_ty) => {
+                                let (data, extra) = base::load_fat_ptr(bcx, r, cast_ty);
+                                OperandValue::FatPtr(data, extra)
+                            },
+
+                            // Cast Ref => Ref
+                            // ex: &StructA => &StructB
+                            OperandValue::Ref(r) => {
+                                assert!(!type_is_immediate(ccx, cast_ty));
+                                OperandValue::Ref(PointerCast(bcx, r, llcast_ty.ptr_to()))
+                            },
+
+                            // Cast Immediate => Immediate
+                            OperandValue::Immediate(i) => {
+                                assert!(type_is_immediate(ccx, cast_ty));
+                                let val = match (val_kind, cast_kind) {
+                                    (TypeKind::Pointer, TypeKind::Integer) =>
+                                        PtrToInt(bcx, i, llcast_ty),
+
+                                    (TypeKind::Integer, TypeKind::Pointer) =>
+                                        IntToPtr(bcx, i, llcast_ty),
+
+                                    (TypeKind::Pointer, TypeKind::Pointer) =>
+                                        PointerCast(bcx, i, llcast_ty),
+
+                                    _ if nonpointer_nonaggregate(val_kind) &&
+                                         nonpointer_nonaggregate(cast_kind) => {
+                                        BitCast(bcx, i, llcast_ty)
+                                    },
+
+                                    _ => {
+                                        let lltemp = base::alloc_ty(bcx, cast_ty, "__transmute_temp");
+                                        let lldest = PointerCast(bcx, lltemp, llval_ty.ptr_to());
+                                        base::store_ty(bcx, i, lldest, operand.ty);
+                                        base::load_ty(bcx, lltemp, cast_ty)
+                                    }
+                                };
+                                OperandValue::Immediate(val)
+                            },
+
+                            // Fat Ptr => Fat Ptr
+                            OperandValue::FatPtr(_, _) if type_is_fat_ptr(tcx, cast_ty)
+                                => operand.val,
+
+                            // Fat Ptr => Ref
+                            // ex: &[T] => (*const T, usize)
+                            OperandValue::FatPtr(d, e) => {
+                                assert!(!type_is_immediate(ccx, cast_ty));
+                                let lltemp = base::alloc_ty(bcx, cast_ty, "__transmute_temp");
+                                let lldest = PointerCast(bcx, lltemp, llval_ty.ptr_to());
+                                base::store_fat_ptr(bcx, d, e, lldest, operand.ty);
+                                OperandValue::Ref(lltemp)
+                            }
                         }
                     }
                 };

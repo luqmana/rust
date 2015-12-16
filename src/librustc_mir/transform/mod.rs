@@ -10,6 +10,7 @@
 
 pub mod simplify_cfg;
 pub mod erase_regions;
+pub mod lower_intrinsics;
 mod util;
 
 use rustc::mir::repr::Mir;

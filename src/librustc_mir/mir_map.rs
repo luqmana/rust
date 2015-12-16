@@ -145,6 +145,7 @@ impl<'a, 'm, 'tcx> Visitor<'tcx> for InnerDump<'a,'m,'tcx> {
 
         match build_mir(Cx::new(&infcx), implicit_arg_tys, id, span, decl, body) {
             Ok(mut mir) => {
+                lower_intrinsics::LowerIntrinsics::new(self.tcx).run_on_mir(&mut mir);
                 simplify_cfg::SimplifyCfg::new().run_on_mir(&mut mir);
 
                 let meta_item_list = self.attr

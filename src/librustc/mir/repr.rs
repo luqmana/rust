@@ -294,7 +294,7 @@ impl<'tcx> Terminator<'tcx> {
     }
 }
 
-#[derive(Debug, RustcEncodable, RustcDecodable)]
+#[derive(Clone, Debug, RustcEncodable, RustcDecodable)]
 pub struct CallData<'tcx> {
     /// where the return value is written to
     pub destination: Lvalue<'tcx>,
@@ -609,6 +609,8 @@ pub enum CastKind {
     /// `&[i32;N]` to a `&[i32]`, or a `Box<T>` to a `Box<Trait>`
     /// (presuming `T: Trait`).
     Unsize,
+
+    Transmute,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, RustcEncodable, RustcDecodable)]
