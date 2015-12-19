@@ -563,6 +563,11 @@ pub enum Rvalue<'tcx> {
     // length of a [X] or [X;n] value
     Len(Lvalue<'tcx>),
 
+    // size of type
+    // If it's unsized you must also pass the operand so
+    // we can read the size from the `extra` field
+    SizeOf(Ty<'tcx>, Option<Operand<'tcx>>),
+
     Cast(CastKind, Operand<'tcx>, Ty<'tcx>),
 
     BinaryOp(BinOp, Operand<'tcx>, Operand<'tcx>),
@@ -674,6 +679,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
             Repeat(ref a, ref b) => write!(fmt, "[{:?}; {:?}]", a, b),
             Ref(ref a, bk, ref b) => write!(fmt, "&{:?} {:?} {:?}", a, bk, b),
             Len(ref a) => write!(fmt, "LEN({:?})", a),
+            SizeOf(ref t, ref e) => write!(fmt, "SizeOf({:?} [{:?}])", t, e),
             Cast(ref kind, ref lv, ref ty) => write!(fmt, "{:?} as {:?} ({:?}", lv, ty, kind),
             BinaryOp(ref op, ref a, ref b) => write!(fmt, "{:?}({:?},{:?})", op, a, b),
             UnaryOp(ref op, ref a) => write!(fmt, "{:?}({:?})", op, a),

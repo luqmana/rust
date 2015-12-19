@@ -13,6 +13,7 @@ use rustc::middle::ty::{self, Ty};
 use middle::ty::cast::{CastTy, IntTy};
 use rustc::mir::repr as mir;
 
+use trans::adt;
 use trans::asm;
 use trans::base;
 use trans::build::{self, BitCast, IntToPtr, PointerCast, PtrToInt};
@@ -20,7 +21,7 @@ use trans::common::{self, Block, Result};
 use trans::debuginfo::DebugLoc;
 use trans::declare;
 use trans::expr;
-use trans::adt;
+use trans::glue;
 use trans::machine;
 use trans::type_::Type;
 use trans::type_of;
@@ -404,6 +405,25 @@ impl<'bcx, 'tcx> MirContext<'bcx, 'tcx> {
                 })
             }
 
+            mir::Rvalue::SizeOf(ty, ref operand) => {
+                let ty: Ty<'tcx> = bcx.monomorphize(&ty);
+
+                assert_eq!(operand.is_none(), common::type_is_sized(bcx.tcx(), ty));
+
+                let llsize = if let Some(ref operand) = *operand {
+                    let (_, extra) = self.trans_operand(bcx, operand).fat_ptr();
+                    glue::size_and_align_of_dst(bcx, ty, extra).0
+                } else {
+                    let llty = type_of::type_of(bcx.ccx(), ty);
+                    common::C_uint(bcx.ccx(), machine::llsize_of_alloc(bcx.ccx(), llty))
+                };
+
+                (bcx, OperandRef {
+                    val: OperandValue::Immediate(llsize),
+                    ty: bcx.tcx().types.usize
+                })
+            }
+
             mir::Rvalue::BinaryOp(op, ref lhs, ref rhs) => {
                 let lhs = self.trans_operand(bcx, lhs);
                 let rhs = self.trans_operand(bcx, rhs);
@@ -583,6 +603,7 @@ pub fn rvalue_creates_operand<'tcx>(rvalue: &mir::Rvalue<'tcx>) -> bool {
         mir::Rvalue::Use(..) | // (*)
         mir::Rvalue::Ref(..) |
         mir::Rvalue::Len(..) |
+        mir::Rvalue::SizeOf(..) |
         mir::Rvalue::Cast(..) | // (*)
         mir::Rvalue::BinaryOp(..) |
         mir::Rvalue::UnaryOp(..) |

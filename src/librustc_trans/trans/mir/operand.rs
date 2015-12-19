@@ -58,6 +58,15 @@ impl<'tcx> OperandRef<'tcx> {
         }
     }
 
+    /// Asserts that this operand refers to a fat ptr and returns
+    /// a reference to its values.
+    pub fn fat_ptr(self) -> (ValueRef, ValueRef) {
+        match self.val {
+            OperandValue::FatPtr(data, extra) => (data, extra),
+            _ => unreachable!()
+        }
+    }
+
     pub fn repr<'bcx>(self, bcx: Block<'bcx, 'tcx>) -> String {
         match self.val {
             OperandValue::Ref(r) => {

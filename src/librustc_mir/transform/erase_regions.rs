@@ -162,6 +162,10 @@ impl<'a, 'tcx> EraseRegions<'a, 'tcx> {
                 self.erase_regions_lvalue(lvalue);
             }
             Rvalue::Len(ref mut lvalue) => self.erase_regions_lvalue(lvalue),
+            Rvalue::SizeOf(ref mut ty, ref mut operand) => {
+                operand.as_mut().map(|op| self.erase_regions_operand(op));
+                *ty = self.tcx.erase_regions(ty);
+            }
             Rvalue::Cast(_, ref mut operand, ref mut ty) => {
                 self.erase_regions_operand(operand);
                 *ty = self.tcx.erase_regions(ty);

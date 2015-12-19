@@ -13,12 +13,15 @@
 
 use transform::MirPass;
 
+use rustc::middle::const_eval;
 use rustc::middle::infer;
+use rustc::middle::subst;
 use rustc::middle::ty;
 use rustc::mir::repr::*;
 use rustc::mir::repr::Terminator::Call;
 
 use syntax::abi;
+use syntax::parse::token;
 
 
 pub struct LowerIntrinsics<'a, 'tcx: 'a> {
@@ -71,10 +74,10 @@ fn lower_intrinsic_in_basic_block<'tcx>(tcx: &ty::ctxt<'tcx>,
         } else {
             tcx.sess.bug("expected `Call` terminator to lower intrinsic")
         };
-    let (def_id, span, fty) = if let Operand::Constant(Constant {
-        span, ty, literal: Literal::Item { def_id, .. }
+    let (def_id, span, fty, substs) = if let Operand::Constant(Constant {
+        span, ty, literal: Literal::Item { def_id, substs, .. }
     }) = call_data.func {
-        (def_id, span, ty)
+        (def_id, span, ty, substs)
     } else {
         tcx.sess.bug("could not get literal item to lower intrinsic")
     };
@@ -102,10 +105,6 @@ fn lower_intrinsic_in_basic_block<'tcx>(tcx: &ty::ctxt<'tcx>,
             )
         });
 
-        // Since this is no longer a function call, replace the
-        // terminator with a simple Goto
-        basic_block.terminator = Terminator::Goto { target: targets.0 };
-
     } else if name == "move_val_init" {
 
         assert_eq!(call_data.args.len(), 2);
@@ -125,9 +124,59 @@ fn lower_intrinsic_in_basic_block<'tcx>(tcx: &ty::ctxt<'tcx>,
             tcx.sess.span_bug(span, "destination argument not lvalue?");
         }
 
-        // Since this is no longer a function call, replace the
-        // terminator with a simple Goto
-        basic_block.terminator = Terminator::Goto { target: targets.0 };
+    } else if name == "size_of" {
+
+        // dest = size_of<T>()
+        //   =>
+        // Assign(dest, SizeOf(T))
+        basic_block.statements.push(Statement {
+            span: span,
+            kind: StatementKind::Assign(
+                call_data.destination.clone(),
+                Rvalue::SizeOf(*substs.types.get(subst::FnSpace, 0), None)
+            )
+        });
+
+    } else if name == "size_of_val" {
+
+        // dest = size_of_val<T>(x)
+        //   =>
+        // Assign(dest, SizeOf(T, x))
+        basic_block.statements.push(Statement {
+            span: span,
+            kind: StatementKind::Assign(
+                call_data.destination.clone(),
+                Rvalue::SizeOf(*substs.types.get(subst::FnSpace, 0),
+                               Some(call_data.args[0].clone()))
+            )
+        });
+
+    } else if name == "type_name" {
+
+        let tp_ty = *substs.types.get(subst::FnSpace, 0);
+        let ty_name = token::intern_and_get_ident(&tp_ty.to_string());
+        let name_op = Operand::Constant(Constant {
+            span: span,
+            ty: tcx.mk_static_str(),
+            literal: Literal::Value {
+                value: const_eval::ConstVal::Str(ty_name)
+            }
+        });
+
+        // dest = type_name<T>()
+        //   =>
+        // Assign(dest, Use(<ty name>)
+        basic_block.statements.push(Statement {
+            span: span,
+            kind: StatementKind::Assign(
+                call_data.destination.clone(),
+                Rvalue::Use(name_op)
+            )
+        });
 
     }
+
+    // Since this is no longer a function call, replace the
+    // terminator with a simple Goto
+    basic_block.terminator = Terminator::Goto { target: targets.0 };
 }

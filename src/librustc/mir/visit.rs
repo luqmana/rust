@@ -172,6 +172,10 @@ pub trait Visitor<'tcx> {
                 self.visit_lvalue(path, LvalueContext::Inspect);
             }
 
+            Rvalue::SizeOf(_, ref operand) => {
+                operand.as_ref().map(|op| self.visit_operand(op));
+            }
+
             Rvalue::Cast(_, ref operand, _) => {
                 self.visit_operand(operand);
             }
@@ -457,6 +461,10 @@ pub trait MutVisitor<'tcx> {
 
             Rvalue::Len(ref mut path) => {
                 self.visit_lvalue(path, LvalueContext::Inspect);
+            }
+
+            Rvalue::SizeOf(_, ref mut operand) => {
+                operand.as_mut().map(|op| self.visit_operand(op));
             }
 
             Rvalue::Cast(_, ref mut operand, _) => {
